@@ -89,7 +89,7 @@ class SequenceDiscriminatorP(nn.Module):
         kernel_size = (layer.kernel_size[0], 1)
         stride = (layer.stride[0], 1)
         padding = (layer.padding[0], 0)
-        mask = F.max_pool2d(mask.float(), kernel_size, stride, padding)
+        mask = -F.max_pool2d(-mask.float(), kernel_size, stride, padding)
         return mask > 0.5
 
     def forward(
@@ -209,6 +209,7 @@ class SequenceDiscriminatorR(nn.Module):
         x = x - x.mean(dim=-1, keepdim=True)
         x = 0.8 * x / (x.abs().max(dim=-1, keepdim=True)[0] + 1e-9)
         spec = self.spec_fn(x)
+        mask = mask.float()
         out_paddings = frame_paddings(1 - mask.unsqueeze(1),
                                       frame_size=self.spec_fn.n_fft,
                                       hop_size=self.spec_fn.hop_length)

@@ -5,6 +5,8 @@ from wenet.transformer.encoder import TransformerEncoder
 from wenet.utils.common import mask_to_bias
 from wenet.utils.mask import causal_or_lookahead_mask
 
+from vocos.utils import MelSpectrogram
+
 
 class Transformer(TransformerEncoder):
 

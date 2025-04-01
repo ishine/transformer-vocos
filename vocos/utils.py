@@ -1,7 +1,9 @@
 import math
+import os
 from functools import partial
 
 import torch
+import torch.distributed as dist
 import torchaudio
 from torch.optim.lr_scheduler import LambdaLR
 
@@ -58,7 +60,7 @@ def frame_paddings(paddings: torch.Tensor, *, frame_size: int,
     paddings_frame = paddings.unfold(-1, frame_size, hop_size)
 
     # Compute max padding per frame
-    out_paddings = paddings_frame.min(dim=-1).values
+    out_paddings = paddings_frame.max(dim=-1).values
     return out_paddings
 
 
@@ -125,3 +127,17 @@ class MelSpectrogram(torch.nn.Module):
         features = torch.log(torch.clip(mel, min=1e-6))
 
         return features, out_paddings
+
+
+def init_distributed(configs):
+
+    local_rank = os.environ.get('LOCAL_RANK', 0)
+    world_size = int(os.environ.get('WORLD_SIZE', 1))
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
+    rank = int(os.environ.get('RANK', 0))
+
+    torch.cuda.set_device(local_rank)
+    print('training on multiple gpus, this gpu {}'.format(local_rank) +
+          ', rank {}, world_size {}'.format(rank, world_size))
+
+    return world_size, local_rank, rank
