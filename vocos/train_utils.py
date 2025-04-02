@@ -19,6 +19,7 @@ from vocos.utils import (MelSpectrogram, get_cosine_schedule_with_warmup,
 class VocosTrainModel(torch.nn.Module):
 
     def __init__(self, config):
+        super().__init__()
         self.feature_extractor = MelSpectrogram(
             sample_rate=config.sample_rate,
             n_fft=config.n_fft,
@@ -59,8 +60,8 @@ class VocosState:
         self.multiresddisc = torch.nn.parallel.DistributedDataParallel(
             SequenceMultiResolutionDiscriminator().cuda())
 
-        self.melspec_loss = torch.nn.parallel.DistributedDataParallel(
-            MelSpecReconstructionLoss(sample_rate=config.sample_rate).cuda())
+        self.melspec_loss = MelSpecReconstructionLoss(
+            sample_rate=config.sample_rate).cuda()
 
         self.sample_rate = config.sample_rate
         self.learning_rate = config.learning_rate
@@ -72,7 +73,7 @@ class VocosState:
         self.decay_mel_coeff = config.decay_mel_coeff
 
         self.max_steps = config.max_train_steps
-        self.dataloader, _ = init_dataset_and_dataloader(
+        _, self.dataloader = init_dataset_and_dataloader(
             config.train_data,
             config.per_device_batch_size,
             config.num_workers,
@@ -113,7 +114,7 @@ class VocosState:
         wav, wav_lens = batch['wavs'].to(device), batch['wavs_lens'].to(device)
         self.opt_gen.zero_grad()
         log_str = ''
-        if self.train_discriminator:
+        if self.config.train_discriminator:
             self.opt_disc.zero_grad()
             with torch.no_grad():
                 wav_g, wavg_mask = self.model(wav, wav_lens)
@@ -154,13 +155,16 @@ class VocosState:
         mel_loss = self.melspec_loss(wav_g, wav, wavg_mask)
         gen_loss = mel_loss * self.mel_loss_coeff
 
-        gen_score_mp, gen_score_mp_mask, fmap_gs_mp, fmap_gs_mp_mask = self.multiperioddisc(
-            wav_g, wavg_mask)
-        real_score_mp, _, fmap_rs_mp, _ = self.multiperioddisc(wav, wavg_mask)
+        with torch.no_grad():
+            gen_score_mp, gen_score_mp_mask, fmap_gs_mp, fmap_gs_mp_mask = self.multiperioddisc(
+                wav_g, wavg_mask)
+            real_score_mp, _, fmap_rs_mp, _ = self.multiperioddisc(
+                wav, wavg_mask)
 
-        gen_score_mrd, gen_score_mrd_mask, fmap_gs_mrd, fmaps_gs_mrd_mask = self.multiresddisc(
-            wav_g, wavg_mask)
-        real_score_mrd, _, fmap_rs_mrd, _ = self.multiresddisc(wav, wavg_mask)
+            gen_score_mrd, gen_score_mrd_mask, fmap_gs_mrd, fmaps_gs_mrd_mask = self.multiresddisc(
+                wav_g, wavg_mask)
+            real_score_mrd, _, fmap_rs_mrd, _ = self.multiresddisc(
+                wav, wavg_mask)
 
         loss_gen_mp, _ = compute_generator_loss(gen_score_mp,
                                                 gen_score_mp_mask)
@@ -199,7 +203,7 @@ class VocosState:
             self.mel_loss_coeff = self.base_mel_coeff * max(
                 0.0, 0.5 * (1.0 + math.cos(math.pi *
                                            (self.step / self.max_steps))))
-        if (self.step + 1) % self.config.log_interval:
+        if self.step % self.config.log_interval == 0:
             print(log_str)
 
     def train(self):
@@ -217,16 +221,15 @@ class VocosState:
         os.makedirs(checkpoint_dir)
 
         model_state_dict = self.model.module.state_dict()
-        torch.save(model_state_dict, os.path.join('checkpoint_dir',
-                                                  'model.pt'))
+        torch.save(model_state_dict, os.path.join(checkpoint_dir, 'model.pt'))
         mpd_state_dict = self.multiperioddisc.module.state_dict()
-        torch.save(mpd_state_dict, os.path.join('checkpoint_dir', 'mpd.pt'))
+        torch.save(mpd_state_dict, os.path.join(checkpoint_dir, 'mpd.pt'))
         mrd_state_dict = self.multiresddisc.module.state_dict()
-        torch.save(mrd_state_dict, os.path.join('checkpoint_dir', 'mrd.pt'))
+        torch.save(mrd_state_dict, os.path.join(checkpoint_dir, 'mrd.pt'))
 
         opt_disc_state_dict = self.opt_disc.state_dict()
         torch.save(opt_disc_state_dict,
-                   os.path.join('checkpoint_dir', 'opt_disc.pt'))
+                   os.path.join(checkpoint_dir, 'opt_disc.pt'))
         opt_gen_state_dict = self.opt_gen.state_dict()
         torch.save(opt_gen_state_dict,
-                   os.path.join('checkpoint_dir', 'opt_gen.pt'))
+                   os.path.join(checkpoint_dir, 'opt_gen.pt'))
