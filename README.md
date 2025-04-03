@@ -36,6 +36,5 @@ TODO:
   - [ ] check training process
 - [ ] dev benchmark etc
 - [ ] infer
-   - [ ] 
+   - [ ] offline
    - [ ] chunk by chunk or frame by frame
-   - [ ] onnx
