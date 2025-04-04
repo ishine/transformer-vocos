@@ -31,10 +31,16 @@ torchrun --standalone --nnodes=1 --nproc_per_node=8 vocos/main.py -- \
 ```
 
 TODO:
-- [x] training 
-   - [x] training works
-   - [x] check training process
-   - [ ] cv interval
+- [ ] training 
+  - [x] training works
+  - [x] check training process
+   - [x] generator
+   - [x] disc
+   - [ ] transformer discriminators
+   - [ ] resume
+- [ ] dev benchmark etc
 - [ ] infer
    - [x] offline
    - [ ] chunk by chunk or frame by frame
+   - [ ] onnx
+- [ ] exmple for: cosyvoice2 and transformer-vocos
