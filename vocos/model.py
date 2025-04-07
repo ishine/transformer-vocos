@@ -3,9 +3,7 @@ from typing import Optional, Tuple
 import torch
 from wenet.transformer.encoder import TransformerEncoder
 from wenet.utils.common import mask_to_bias
-from wenet.utils.mask import causal_or_lookahead_mask
-
-from vocos.utils import MelSpectrogram
+from wenet.utils.mask import (causal_or_lookahead_mask, make_pad_mask)
 
 
 class Transformer(TransformerEncoder):
@@ -65,15 +63,67 @@ class Transformer(TransformerEncoder):
         # for cross attention with decoder later
         return xs, masks
 
-    def forward_chunk_by_chunk(self,
-                               xs,
-                               decoding_chunk_size,
-                               num_decoding_left_chunks=-1):
-        pass
+    def forward_chunk(
+        self,
+        chunk_xs,
+        chunk_lens,
+        offset,
+        att_cache,
+        cache_mask,
+        cnn_cache=None,
+    ):
+        # TODO: for conformer cnn cache
+        offset = offset.squeeze(1)
+        T = chunk_xs.size(1)
+        chunk_mask = ~make_pad_mask(chunk_lens, T).unsqueeze(1)
+        # B X 1 X T
+        chunk_mask = chunk_mask.to(chunk_xs.dtype)
+        # transpose batch & num_layers dim
+        att_cache = torch.transpose(att_cache, 0, 1)
+        cnn_cache = torch.transpose(cnn_cache, 0, 1)
 
-    def forward_chunk(self, xs, offset, required_cache_size, att_cache,
-                      cnn_cache, att_mask):
-        pass
+        xs = chunk_xs
+        # chunk mask is important for batch inferencing since
+        # different sequence in a batch has different length
+        xs, pos_emb, chunk_mask = self.embed(xs, chunk_mask, offset)
+        cache_size = att_cache.size(3)  # required cache size
+        masks = torch.cat((cache_mask, chunk_mask), dim=2)
+        index = offset - cache_size
+
+        pos_emb = self.embed.position_encoding(index, cache_size + xs.size(1))
+        pos_emb = pos_emb.to(dtype=xs.dtype)
+
+        next_cache_start = -self.required_cache_size
+        r_cache_mask = masks[:, :, next_cache_start:]
+
+        r_att_cache = []
+        for i, layer in enumerate(self.encoder.encoders):
+            i_kv_cache = att_cache[i]
+            size = att_cache.size(-1) // 2
+            kv_cache = (i_kv_cache[:, :, :, :size], i_kv_cache[:, :, :, size:])
+            xs, _, new_kv_cache, new_cnn_cache = layer(
+                xs,
+                masks,
+                pos_emb,
+                att_cache=kv_cache,
+                cnn_cache=cnn_cache[i],
+            )
+            #   shape(new_att_cache) is (B, head, attention_key_size, d_k * 2),
+            #   shape(new_cnn_cache) is (B, hidden-dim, cache_t2)
+            new_att_cache = torch.cat(new_kv_cache, dim=-1)
+            r_att_cache.append(
+                new_att_cache[:, :, next_cache_start:, :].unsqueeze(1))
+
+        if self.normalize_before:
+            chunk_out = self.after_norm(xs)
+        r_offset = offset + chunk_out.shape[1]
+        return (
+            chunk_out,
+            chunk_mask,
+            r_offset,
+            r_att_cache,
+            r_cache_mask,
+        )
 
 
 class ISTFT(torch.nn.Module):
