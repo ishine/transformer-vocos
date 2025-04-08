@@ -28,6 +28,7 @@ class VocosTrainModel(torch.nn.Module):
             hop_length=config.hop_size,
             n_mels=config.n_mels,
             padding='center',
+            power=config.power,
         )
         self.backbone = Transformer(config)
         self.head = ISTFTHead(config)

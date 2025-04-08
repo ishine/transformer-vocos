@@ -71,7 +71,8 @@ class MelSpectrogram(torch.nn.Module):
                  n_fft=1024,
                  hop_length=256,
                  n_mels=100,
-                 padding="center"):
+                 padding="center",
+                 power=1):
         super().__init__()
         if padding not in ["center", "same"]:
             raise ValueError("Padding must be 'center' or 'same'.")
@@ -82,7 +83,7 @@ class MelSpectrogram(torch.nn.Module):
             hop_length=hop_length,
             n_mels=n_mels,
             center=False,
-            power=1,
+            power=power,
         )
 
     def forward(self, audio, paddings=None, **kwargs):
