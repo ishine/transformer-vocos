@@ -51,7 +51,7 @@ def get_config():
 
     # loss
     config.mel_loss_coeff = 45
-    config.mrd_loss_coeff = 0.1
+    config.mrd_loss_coeff = 1.0 # 0.1 for fintune
     config.pretrain_mel_steps = 0
     config.decay_mel_coeff = False
     config.disc_train_start = 0
