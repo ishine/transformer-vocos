@@ -47,7 +47,7 @@ def get_config():
     config.fmax = None
     config.norm = 'slaney'
     config.mel_scale = 'slaney'
-    config.padding = "center",
+    config.padding = "center"
 
     # loss
     config.mel_loss_coeff = 45
