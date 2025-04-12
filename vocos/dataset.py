@@ -121,7 +121,6 @@ def init_dataset_and_dataloader(files,
         dataset = dataset.dynamic_batch(
             DynamicBatchWindow(max_frames_in_batch),
             wrapper_class=partial(padding, pad_value=0.0),
-            drop_last=drop_last,
         )
     generator = torch.Generator()
     generator.manual_seed(seed)
