@@ -40,6 +40,7 @@ TODO:
    - [ ] distill
    - [x] resume
    - [ ] stereo for music
+   - [ ] cqt loss
 - [ ] dev benchmark etc
 - [ ] infer
    - [x] offline
