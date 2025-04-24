@@ -48,6 +48,7 @@ def get_config():
     config.norm = 'slaney'
     config.mel_scale = 'slaney'
     config.padding = "center"
+    config.multiscale_mel_loss = True
 
     # loss
     config.mel_loss_coeff = 45
