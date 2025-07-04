@@ -1,9 +1,10 @@
 from typing import List, Tuple
 
+import numpy as np
 import torch
 from torch import nn
 
-from vocos.utils import MelSpectrogram
+from vocos.utils import STFT, MelSpectrogram
 
 
 def cal_mean_with_mask(input: torch.Tensor, mask: torch.Tensor, dim=None):
@@ -13,15 +14,205 @@ def cal_mean_with_mask(input: torch.Tensor, mask: torch.Tensor, dim=None):
         valid_scores = input
         masked_scores = valid_scores * mask.float()
 
-        valid_elements = mask.broadcast_to(input.shape).sum().float()
+        valid_elements = mask.broadcast_to(input.shape).sum(
+            dim=dim, keepdim=True).float()
         valid_elements = torch.clamp(valid_elements, min=1e-6)
 
         if dim is None:
-            loss_term = masked_scores.sum() / valid_elements
+            loss_term = masked_scores.sum() / valid_elements.sum()
         else:
             loss_term = masked_scores.sum(dim=dim,
                                           keepdim=True) / valid_elements
     return loss_term
+
+
+def _unwrap(p, dim=-1, discont=np.pi):
+    dd = torch.diff(p, dim=dim)
+    dd_mod = (dd + np.pi) % (2 * np.pi) - np.pi
+
+    dd_mod = torch.where((dd_mod == -np.pi) & (dd > 0), np.pi, dd_mod)
+
+    correction = torch.cumsum(dd - dd_mod, dim=dim)
+
+    out = torch.zeros_like(p)
+    out.select(dim, 0).copy_(p.select(dim, 0))  # 第一帧保持不变
+
+    slicer = [slice(None)] * p.dim()
+    slicer[dim] = slice(1, None)
+    out[tuple(slicer)] = p[tuple(slicer)] - correction
+
+    return out
+
+
+def compute_phase_loss(stft_pred, stft_true, mask, win_length, hop_size):
+    B, C, F, T_stft = stft_pred.shape
+    stft_pred = stft_pred.view(B, C, F, T_stft)
+    stft_true = stft_true.view(B, C, F, T_stft)
+
+    phase_pred = torch.angle(stft_pred)
+    phase_true = torch.angle(stft_true)
+
+    unwrapped_phase_pred = _unwrap(phase_pred, dim=-1)
+    unwrapped_phase_true = _unwrap(phase_true, dim=-1)
+
+    delta_phase_pred = unwrapped_phase_pred[..., 1:] - unwrapped_phase_pred[
+        ..., :-1]
+    delta_phase_true = unwrapped_phase_true[..., 1:] - unwrapped_phase_true[
+        ..., :-1]
+
+    mag_true = torch.abs(stft_true[..., 1:])
+    mask_mag = mag_true > 1e-7
+
+    if mask is not None:
+        # mask: (B, T) -> STFT 帧级别 mask
+        valid_lengths = mask.sum(-1)
+
+        time_indices = torch.arange(
+            T_stft - 1,
+            device=stft_pred.device).unsqueeze(0).expand(B, T_stft - 1)
+        mask_length = time_indices < valid_lengths.unsqueeze(1)
+        mask_length = mask_length.unsqueeze(1).unsqueeze(1).expand(B, C, F, -1)
+
+        mask_mag = mask_mag & mask_length
+
+    loss = torch.abs(delta_phase_pred - delta_phase_true)
+    loss = loss[mask_mag]
+    loss = loss.mean()
+
+    return loss
+
+
+def masked_spectral_convergence_loss(x_mag: torch.Tensor, y_mag: torch.Tensor,
+                                     mask: torch.Tensor) -> torch.Tensor:
+    """
+    Calculates the masked spectral convergence loss for multi-channel inputs.
+
+    This implementation correctly handles arbitrary masks across channels by
+    aggregating all unmasked values before the final norm calculation.
+
+    Args:
+        x_mag (torch.Tensor): Predicted magnitude spectrogram.
+                              Shape: (batch, channels, freq_bins, time_frames)
+        y_mag (torch.Tensor): Ground truth magnitude spectrogram.
+                              Shape: (batch, channels, freq_bins, time_frames)
+        mask (torch.Tensor): Boolean or binary tensor with the same shape as the inputs.
+                             The loss will be computed only where the mask is True (or 1).
+
+    Returns:
+        torch.Tensor: A loss tensor for each item in the batch. Shape: (batch, channels)
+    """
+    # Ensure mask is a float for multiplication
+    mask_float = mask.float()
+
+    # Apply the mask to the tensors before any calculation
+    masked_diff = (y_mag - x_mag) * mask_float
+    masked_true = y_mag * mask_float
+
+    # Calculate the squared sum for the numerator and denominator.
+    # We sum over all three dimensions (channel, freq, time) - dims [1, 2, 3] -
+    # to correctly aggregate all unmasked values.
+    numerator_sq_sum = torch.sum(masked_diff**2, dim=[2, 3])
+    denominator_sq_sum = torch.sum(masked_true**2, dim=[2, 3])
+
+    # Take the square root to get the true Frobenius norm
+    numerator = torch.sqrt(numerator_sq_sum)
+    denominator = torch.sqrt(denominator_sq_sum)
+
+    # Add a small epsilon to the denominator for numerical stability
+    loss = numerator / (denominator + 1e-8)
+
+    return loss
+
+
+class STFTLoss(nn.Module):
+
+    def __init__(self,
+                 n_fft=1024,
+                 hop_length=256,
+                 padding="center",
+                 window_fn=torch.hann_window,
+                 spectralconv_weight: int = 1,
+                 log_weight: float = 1,
+                 lin_weight: float = 0.1,
+                 phase_weight: float = 0.5,
+                 power: int = 1) -> None:
+
+        super().__init__()
+
+        #TODO: A_weighting or K_weighting
+        self.stft = STFT(n_fft, hop_length, padding, window_fn, power)
+        self.log_weight = log_weight
+        self.spectralconv_weight = spectralconv_weight
+        self.lin_weight = lin_weight
+        self.phi_weight = phase_weight
+
+    def forward(self, y_hat, y, mask):
+        """
+        Args:
+            y_hat (Tensor): Predicted audio waveform. [B,C,T]
+            y (Tensor): Ground truth audio waveform. [B,C,T]
+
+        Returns:
+            Tensor: L1 loss between the mel-scaled magnitude spectrograms.
+        """
+        B, C, T = y_hat.shape
+        y_hat = y_hat.view(-1, T)
+        y = y.view(-1, T)
+        spec_hat, spec_hat_padding = self.stft(
+            y_hat, ~mask.unsqueeze(1).repeat(1, C, 1).view(-1, T).bool())
+        spec, _ = self.stft(
+            y, ~mask.unsqueeze(1).repeat(1, C, 1).view(-1, T).bool())
+        spec_hat = spec_hat.view(B, C, spec_hat.shape[-2], -1)
+        spec = spec.view(B, C, spec.shape[-2], -1)
+        spec_mask = ~spec_hat_padding.view(B, C,
+                                           spec_hat_padding.shape[-1])[:, 0, :]
+
+        mag_hat = spec_hat.abs()
+        mag = spec.abs()
+
+        loss = 0.0
+        loss_mag = None
+        if self.lin_weight != 0:
+            loss_mag = masked_spectral_convergence_loss(
+                mag_hat, mag,
+                spec_mask.unsqueeze(1).unsqueeze(1)).mean()  # [B,C]
+            loss = loss + self.spectralconv_weight * loss_mag
+
+        # log
+        loss_log_mag = None
+        if self.log_weight != 0:
+            loss_log_mag = cal_mean_with_mask(
+                torch.abs(
+                    torch.log(torch.clip(mag, min=1e-7)) -
+                    torch.log(torch.clip(mag_hat, min=1e-7))),
+                spec_mask.unsqueeze(1).unsqueeze(2),
+                dim=[0, 1, 2, 3]).mean()  # [B,C]
+            loss = loss + self.log_weight * loss_log_mag
+
+        # linear
+        loss_lin_mag = None
+        if self.lin_weight != 0:
+            loss_lin_mag = cal_mean_with_mask(
+                torch.abs(
+                    torch.clip(mag, min=1e-7) - torch.clip(mag_hat, min=1e-7)),
+                spec_mask.unsqueeze(1).unsqueeze(2),
+                dim=[0, 1, 2, 3]).mean()
+            loss = loss + loss_lin_mag * loss_lin_mag
+
+        loss_phase = None
+        if self.phi_weight != 0:
+            loss_phase = compute_phase_loss(spec_hat, spec, spec_mask,
+                                            self.stft.win_length,
+                                            self.stft.hop_length)
+            loss = loss + self.phi_weight * loss_phase
+
+        return {
+            "loss": loss,
+            "loss_mag": loss_mag,
+            "loss_log_mag": loss_log_mag,
+            "loss_lin_mag": loss_lin_mag,
+            "loss_phase": loss_phase,
+        }
 
 
 class MultiScaleMelSpecReconstructionLoss(nn.Module):
@@ -114,7 +305,8 @@ class MelSpecReconstructionLoss(nn.Module):
         mel_hat = mel_hat * mel_mask.unsqueeze(1)
         mel = mel * mel_mask.unsqueeze(1)
 
-        loss = cal_mean_with_mask(torch.abs(mel-mel_hat), mel_mask.unsqueeze(1))
+        loss = cal_mean_with_mask(torch.abs(mel - mel_hat),
+                                  mel_mask.unsqueeze(1))
 
         return loss
 
@@ -188,3 +380,15 @@ def compute_feature_matching_loss(
             loss = loss + cal_mean_with_mask(torch.abs(rl - gl), m)
             nums += 1
     return loss / nums
+
+
+if __name__ == '__main__':
+
+    loss_fn = STFTLoss(882 * 4, 882, phase_weight=0.5)
+    wav = torch.rand(1, 2, 48000)
+    wav_g = torch.rand(1, 2, 48000)
+
+    mask = torch.ones(1, 48000)
+
+    loss = loss_fn(wav_g, wav, mask)
+    print(loss)
