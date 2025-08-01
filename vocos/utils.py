@@ -80,7 +80,7 @@ class STFT(torch.nn.Module):
         self.padding = padding
         self.n_fft = n_fft
         self.hop_length = hop_length
-        self.win_length = hop_length
+        self.win_length = n_fft
         self.paddding = padding
         self.win = window_fn(self.win_length)
 
